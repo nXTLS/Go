@@ -1,12 +1,12 @@
 module github.com/nXTLS/Go
 
-go 1.25
+go 1.18
 
 require (
-	golang.org/x/crypto v0.39.0
+	golang.org/x/crypto v0.0.0-20211215153901-e495a2d5b3d3
 )
 
 require (
-	golang.org/x/sys v0.33.0 // indirect
-	golang.org/x/text v0.26.0 // indirect
+	golang.org/x/sys v0.0.0-20220310020820-b874c991c1a5 // indirect
+	golang.org/x/text v0.3.8-0.20211105212822-18b340fc7af2 // indirect
 )
