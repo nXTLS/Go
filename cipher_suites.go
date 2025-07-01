@@ -15,10 +15,11 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"hash"
-	"internal/cpu"
 	"runtime"
 
 	"golang.org/x/crypto/chacha20poly1305"
+
+	"github.com/nXTLS/Go/internal/cpu"
 )
 
 // CipherSuite is a TLS cipher suite. Note that most functions in this package

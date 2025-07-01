@@ -18,12 +18,13 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"internal/godebug"
 	"io"
 	"net"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/nXTLS/Go/internal/godebug"
 )
 
 const (
