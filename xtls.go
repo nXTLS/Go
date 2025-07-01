@@ -10,6 +10,7 @@ import (
 	"net"
 	"sync"
 	"time"
+	"io"
 )
 
 // XTLSMode describes the transmission mode of the XTLS protocol.
