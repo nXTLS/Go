@@ -23,6 +23,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/nXTLS/Go/internal/godebug"
 )
 
 const (
