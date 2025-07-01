@@ -20,7 +20,7 @@ Clone or vendor this repository.
 (You may rename the import path as needed for your project.)
 
 ```sh
-git clone https://github.com/youruser/nxtls
+git clone https://github.com/nXTLS/Go
 ```
 
 ### 2. Basic Usage
@@ -30,7 +30,7 @@ You create a connection as with `tls.Conn`, but can enable XTLS mode via a simpl
 
 ```go
 import (
-    "github.com/youruser/nxtls/tls"
+    "https://github.com/nXTLS/Go"
     "net"
 )
 
