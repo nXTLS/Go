@@ -7,6 +7,7 @@ package tls
 import (
 	"bytes"
 	"net"
+	"fmt"
 )
 
 // XTLSMode describes the working mode for XTLS data flow.
