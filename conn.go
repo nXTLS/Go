@@ -24,98 +24,284 @@ import (
 
 // A Conn represents a secured connection.
 // It implements the net.Conn interface.
+// Conn represents a secured connection with XTLS extension.
 type Conn struct {
-	// constant
+	// Underlying connection and TLS state.
 	conn        net.Conn
 	isClient    bool
-	handshakeFn func(context.Context) error // (*Conn).clientHandshake or serverHandshake
+	handshakeFn func(context.Context) error
 
-	// handshakeStatus is 1 if the connection is currently transferring
-	// application data (i.e. is not currently processing a handshake).
-	// handshakeStatus == 1 implies handshakeErr == nil.
-	// This field is only to be accessed with sync/atomic.
 	handshakeStatus uint32
-	// constant after handshake; protected by handshakeMutex
-	handshakeMutex sync.Mutex
-	handshakeErr   error   // error resulting from handshake
-	vers           uint16  // TLS version
-	haveVers       bool    // version has been negotiated
-	config         *Config // configuration passed to constructor
-	// handshakes counts the number of handshakes performed on the
-	// connection so far. If renegotiation is disabled then this is either
-	// zero or one.
-	handshakes       int
-	didResume        bool // whether this connection was a session resumption
-	cipherSuite      uint16
-	ocspResponse     []byte   // stapled OCSP response
-	scts             [][]byte // signed certificate timestamps from server
+	handshakeMutex  sync.Mutex
+	handshakeErr    error
+	vers            uint16
+	haveVers        bool
+	config          *Config
+	handshakes      int
+	didResume       bool
+	cipherSuite     uint16
+	ocspResponse    []byte
+	scts            [][]byte
 	peerCertificates []*x509.Certificate
-	// verifiedChains contains the certificate chains that we built, as
-	// opposed to the ones presented by the server.
-	verifiedChains [][]*x509.Certificate
-	// serverName contains the server name indicated by the client, if any.
-	serverName string
-	// secureRenegotiation is true if the server echoed the secure
-	// renegotiation extension. (This is meaningless as a server because
-	// renegotiation is not supported in that case.)
+	verifiedChains  [][]*x509.Certificate
+	serverName      string
 	secureRenegotiation bool
-	// ekm is a closure for exporting keying material.
-	ekm func(label string, context []byte, length int) ([]byte, error)
-	// resumptionSecret is the resumption_master_secret for handling
-	// NewSessionTicket messages. nil if config.SessionTicketsDisabled.
+	ekm             func(label string, context []byte, length int) ([]byte, error)
 	resumptionSecret []byte
-
-	// ticketKeys is the set of active session ticket keys for this
-	// connection. The first one is used to encrypt new tickets and
-	// all are tried to decrypt tickets.
-	ticketKeys []ticketKey
-
-	// clientFinishedIsFirst is true if the client sent the first Finished
-	// message during the most recent handshake. This is recorded because
-	// the first transmitted Finished message is the tls-unique
-	// channel-binding value.
+	ticketKeys      []ticketKey
 	clientFinishedIsFirst bool
-
-	// closeNotifyErr is any error from sending the alertCloseNotify record.
-	closeNotifyErr error
-	// closeNotifySent is true if the Conn attempted to send an
-	// alertCloseNotify record.
+	closeNotifyErr  error
 	closeNotifySent bool
+	clientFinished  [12]byte
+	serverFinished  [12]byte
+	clientProtocol  string
 
-	// clientFinished and serverFinished contain the Finished message sent
-	// by the client or server in the most recent handshake. This is
-	// retained to support the renegotiation extension and tls-unique
-	// channel-binding.
-	clientFinished [12]byte
-	serverFinished [12]byte
+	in, out        halfConn
+	rawInput       bytes.Buffer // raw input, starting with a record header
+	input          bytes.Reader // application data waiting to be read, from rawInput.Next
+	hand           bytes.Buffer // handshake data waiting to be read
+	buffering      bool         // whether records are buffered in sendBuf
+	sendBuf        []byte       // a buffer of records waiting to be sent
 
-	// clientProtocol is the negotiated ALPN protocol.
-	clientProtocol string
+	bytesSent      int64
+	packetsSent    int64
+	retryCount     int
+	activeCall     int32
 
-	// input/output
-	in, out   halfConn
-	rawInput  bytes.Buffer // raw input, starting with a record header
-	input     bytes.Reader // application data waiting to be read, from rawInput.Next
-	hand      bytes.Buffer // handshake data waiting to be read
-	buffering bool         // whether records are buffered in sendBuf
-	sendBuf   []byte       // a buffer of records waiting to be sent
+	tmp            [16]byte
 
-	// bytesSent counts the bytes of application data sent.
-	// packetsSent counts packets.
-	bytesSent   int64
-	packetsSent int64
+	// XTLS enhancements
+	xtlsMode           XTLSMode
+	xtlsInitialized    bool      // Whether XTLS mode detection has completed
+	xtlsDirectReady    bool      // Whether direct mode is ready for full direct
+	xtlsOriginFallback bool      // Fallback to origin logic on anomaly
+	xtlsReadBypass     bool      // If true, all further reads are passthrough
+	xtlsWriteBypass    bool      // If true, all further writes are passthrough
 
-	// retryCount counts the number of consecutive non-advancing records
-	// received by Conn.readRecord. That is, records that neither advance the
-	// handshake, nor deliver application data. Protected by in.Mutex.
-	retryCount int
+	// For matching and stateful detection
+	xtlsDataTotal      int
+	xtlsDataCount      int
+	xtlsFirstPacket    bool
+	xtlsExpectLen      int
+	xtlsMatchCount     int
+	xtlsFallbackCount  int
+	xtlsDebug          bool
+}
 
-	// activeCall is an atomic int32; the low bit is whether Close has
-	// been called. the rest of the bits are the number of goroutines
-	// in Conn.Write.
-	activeCall int32
+// halfConn, permanentError, and supporting types/consts are omitted for brevity.
+// Use the official Go tls library versions for those sections unless you have customizations.
 
-	tmp [16]byte
+// --- XTLS public API ---
+
+// SetXTLSMode sets the XTLS mode before any handshake or data transfer.
+func (c *Conn) SetXTLSMode(mode XTLSMode) {
+	c.xtlsMode = mode
+}
+
+// GetXTLSMode returns the current XTLS mode.
+func (c *Conn) GetXTLSMode() XTLSMode {
+	return c.xtlsMode
+}
+
+// EnableXTLSDebug enables debug output for XTLS logic.
+func (c *Conn) EnableXTLSDebug(enable bool) {
+	c.xtlsDebug = enable
+}
+
+// --- Core Write/Read Methods with XTLS logic ---
+
+func (c *Conn) Write(b []byte) (int, error) {
+	if c.xtlsWriteBypass {
+		return c.xtlsDirectWrite(b)
+	}
+
+	if !c.xtlsInitialized {
+		c.xtlsInitializeXTLSMode()
+	}
+
+	// For Direct mode: after the protocol detection/transition, all writes become passthrough
+	if c.xtlsDirectReady {
+		c.xtlsWriteBypass = true
+		return c.xtlsDirectWrite(b)
+	}
+
+	// Origin mode with monitoring and fallback
+	if c.xtlsOriginFallback {
+		return c.xtlsOriginWriteFallback(b)
+	}
+
+	switch c.xtlsMode {
+	case XTLSModeDirect:
+		return c.xtlsDirectWrite(b)
+	case XTLSModeOrigin:
+		return c.xtlsOriginWrite(b)
+	default:
+		return 0, errors.New("tls: unknown XTLS mode")
+	}
+}
+
+// Read implements the XTLS-aware reader.
+func (c *Conn) Read(b []byte) (int, error) {
+	if c.xtlsReadBypass {
+		return c.xtlsDirectRead(b)
+	}
+
+	if !c.xtlsInitialized {
+		c.xtlsInitializeXTLSMode()
+	}
+
+	// For Direct mode: after the protocol detection/transition, all reads become passthrough
+	if c.xtlsDirectReady {
+		c.xtlsReadBypass = true
+		return c.xtlsDirectRead(b)
+	}
+
+	// Origin fallback
+	if c.xtlsOriginFallback {
+		return c.xtlsOriginReadFallback(b)
+	}
+
+	switch c.xtlsMode {
+	case XTLSModeDirect:
+		return c.xtlsDirectRead(b)
+	case XTLSModeOrigin:
+		return c.xtlsOriginRead(b)
+	default:
+		return 0, errors.New("tls: unknown XTLS mode")
+	}
+}
+
+// --- XTLS Mode Detection/Transition Logic ---
+
+// xtlsInitializeXTLSMode performs initial handshake and protocol detection.
+// This is where you put traffic analysis, UUID check, etc. if needed.
+func (c *Conn) xtlsInitializeXTLSMode() {
+	// This function is intentionally left as a stub for further protocol analysis,
+	// e.g., UUID check, handshake, traffic pattern. In production, you can
+	// make this as strict or as relaxed as your application needs.
+	c.xtlsInitialized = true
+	c.xtlsFirstPacket = true
+	c.xtlsDataTotal = 0
+	c.xtlsDataCount = 0
+	c.xtlsMatchCount = 0
+	c.xtlsFallbackCount = 0
+}
+
+// --- XTLS Direct Mode Logic ---
+
+// xtlsDirectWrite strips trailing TLS1.2 alert (21 3 3 0 26) if present and writes directly.
+func (c *Conn) xtlsDirectWrite(b []byte) (int, error) {
+	const alertPatternLen = 5
+	alertPattern := []byte{0x15, 0x03, 0x03, 0x00, 0x1a}
+	if len(b) >= alertPatternLen && bytes.Equal(b[len(b)-alertPatternLen:], alertPattern) {
+		n, err := c.conn.Write(b[:len(b)-alertPatternLen])
+		if err != nil {
+			return n, err
+		}
+		return n + alertPatternLen, nil
+	}
+	return c.conn.Write(b)
+}
+
+// xtlsDirectRead reads directly from the underlying net.Conn.
+func (c *Conn) xtlsDirectRead(b []byte) (int, error) {
+	return c.conn.Read(b)
+}
+
+// --- XTLS Origin Mode Logic ---
+
+// xtlsOriginWrite is the monitored/protected write for Origin mode.
+func (c *Conn) xtlsOriginWrite(b []byte) (int, error) {
+	// Standard TLS handshake and write logic
+	for {
+		x := atomic.LoadInt32(&c.activeCall)
+		if x&1 != 0 {
+			return 0, net.ErrClosed
+		}
+		if atomic.CompareAndSwapInt32(&c.activeCall, x, x+2) {
+			break
+		}
+	}
+	defer atomic.AddInt32(&c.activeCall, -2)
+
+	if err := c.Handshake(); err != nil {
+		return 0, err
+	}
+
+	c.out.Lock()
+	defer c.out.Unlock()
+
+	if err := c.out.err; err != nil {
+		return 0, err
+	}
+
+	if !c.handshakeComplete() {
+		return 0, errors.New("tls: handshake not complete")
+	}
+
+	if c.closeNotifySent {
+		return 0, errors.New("tls: connection is closed")
+	}
+
+	var m int
+	if len(b) > 1 && c.vers == VersionTLS10 {
+		if _, ok := c.out.cipher.(cipher.BlockMode); ok {
+			n, err := c.writeRecordLocked(recordTypeApplicationData, b[:1])
+			if err != nil {
+				return n, c.out.setErrorLocked(err)
+			}
+			m, b = 1, b[1:]
+		}
+	}
+
+	n, err := c.writeRecordLocked(recordTypeApplicationData, b)
+	return n + m, c.out.setErrorLocked(err)
+}
+
+// xtlsOriginRead provides full TLS record parsing and monitoring for Origin mode.
+func (c *Conn) xtlsOriginRead(b []byte) (int, error) {
+	if err := c.Handshake(); err != nil {
+		return 0, err
+	}
+	if len(b) == 0 {
+		return 0, nil
+	}
+
+	c.in.Lock()
+	defer c.in.Unlock()
+
+	for c.input.Len() == 0 {
+		if err := c.readRecord(); err != nil {
+			return 0, err
+		}
+		for c.hand.Len() > 0 {
+			if err := c.handlePostHandshakeMessage(); err != nil {
+				return 0, err
+			}
+		}
+	}
+
+	n, _ := c.input.Read(b)
+
+	// Handle close-notify alert, see original code.
+	if n != 0 && c.input.Len() == 0 && c.rawInput.Len() > 0 &&
+		recordType(c.rawInput.Bytes()[0]) == recordTypeAlert {
+		if err := c.readRecord(); err != nil {
+			return n, err // will be io.EOF on closeNotify
+		}
+	}
+
+	return n, nil
+}
+
+// --- Origin Fallback Logic (for anomalies, optional, can be extended) ---
+
+func (c *Conn) xtlsOriginWriteFallback(b []byte) (int, error) {
+	// For now, fallback is same as origin. You can implement stricter logic here if needed.
+	return c.xtlsOriginWrite(b)
+}
+func (c *Conn) xtlsOriginReadFallback(b []byte) (int, error) {
+	return c.xtlsOriginRead(b)
 }
 
 // Access to net.Conn methods.
@@ -1098,67 +1284,7 @@ var (
 	errShutdown = errors.New("tls: protocol is shutdown")
 )
 
-// Write writes data to the connection.
-//
-// As Write calls Handshake, in order to prevent indefinite blocking a deadline
-// must be set for both Read and Write before Write is called when the handshake
-// has not yet completed. See SetDeadline, SetReadDeadline, and
-// SetWriteDeadline.
-func (c *Conn) Write(b []byte) (int, error) {
-	// interlock with Close below
-	for {
-		x := atomic.LoadInt32(&c.activeCall)
-		if x&1 != 0 {
-			return 0, net.ErrClosed
-		}
-		if atomic.CompareAndSwapInt32(&c.activeCall, x, x+2) {
-			break
-		}
-	}
-	defer atomic.AddInt32(&c.activeCall, -2)
 
-	if err := c.Handshake(); err != nil {
-		return 0, err
-	}
-
-	c.out.Lock()
-	defer c.out.Unlock()
-
-	if err := c.out.err; err != nil {
-		return 0, err
-	}
-
-	if !c.handshakeComplete() {
-		return 0, alertInternalError
-	}
-
-	if c.closeNotifySent {
-		return 0, errShutdown
-	}
-
-	// TLS 1.0 is susceptible to a chosen-plaintext
-	// attack when using block mode ciphers due to predictable IVs.
-	// This can be prevented by splitting each Application Data
-	// record into two records, effectively randomizing the IV.
-	//
-	// https://www.openssl.org/~bodo/tls-cbc.txt
-	// https://bugzilla.mozilla.org/show_bug.cgi?id=665814
-	// https://www.imperialviolet.org/2012/01/15/beastfollowup.html
-
-	var m int
-	if len(b) > 1 && c.vers == VersionTLS10 {
-		if _, ok := c.out.cipher.(cipher.BlockMode); ok {
-			n, err := c.writeRecordLocked(recordTypeApplicationData, b[:1])
-			if err != nil {
-				return n, c.out.setErrorLocked(err)
-			}
-			m, b = 1, b[1:]
-		}
-	}
-
-	n, err := c.writeRecordLocked(recordTypeApplicationData, b)
-	return n + m, c.out.setErrorLocked(err)
-}
 
 // handleRenegotiation processes a HelloRequest handshake message.
 func (c *Conn) handleRenegotiation() error {
@@ -1262,54 +1388,6 @@ func (c *Conn) handleKeyUpdate(keyUpdate *keyUpdateMsg) error {
 	return nil
 }
 
-// Read reads data from the connection.
-//
-// As Read calls Handshake, in order to prevent indefinite blocking a deadline
-// must be set for both Read and Write before Read is called when the handshake
-// has not yet completed. See SetDeadline, SetReadDeadline, and
-// SetWriteDeadline.
-func (c *Conn) Read(b []byte) (int, error) {
-	if err := c.Handshake(); err != nil {
-		return 0, err
-	}
-	if len(b) == 0 {
-		// Put this after Handshake, in case people were calling
-		// Read(nil) for the side effect of the Handshake.
-		return 0, nil
-	}
-
-	c.in.Lock()
-	defer c.in.Unlock()
-
-	for c.input.Len() == 0 {
-		if err := c.readRecord(); err != nil {
-			return 0, err
-		}
-		for c.hand.Len() > 0 {
-			if err := c.handlePostHandshakeMessage(); err != nil {
-				return 0, err
-			}
-		}
-	}
-
-	n, _ := c.input.Read(b)
-
-	// If a close-notify alert is waiting, read it so that we can return (n,
-	// EOF) instead of (n, nil), to signal to the HTTP response reading
-	// goroutine that the connection is now closed. This eliminates a race
-	// where the HTTP response reading goroutine would otherwise not observe
-	// the EOF until its next read, by which time a client goroutine might
-	// have already tried to reuse the HTTP connection for a new request.
-	// See https://golang.org/cl/76400046 and https://golang.org/issue/3514
-	if n != 0 && c.input.Len() == 0 && c.rawInput.Len() > 0 &&
-		recordType(c.rawInput.Bytes()[0]) == recordTypeAlert {
-		if err := c.readRecord(); err != nil {
-			return n, err // will be io.EOF on closeNotify
-		}
-	}
-
-	return n, nil
-}
 
 // Close closes the connection.
 func (c *Conn) Close() error {
