@@ -1,7 +1,5 @@
 // MIT License: nXTLS compatibility glue for XTLS API consumers.
-// This package provides an XTLS-like API surface over nXTLS for legacy and new projects.
-// It allows using nXTLS as a drop-in replacement for XTLS in most Go projects.
-// Author: nXTLS contributors
+// Provides an XTLS-like API surface over nXTLS for legacy and new projects.
 
 package xtls
 
@@ -13,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	nxtls "github.com/nXTLS/Go"
+	nxtls "github.com/nXTLS/Go/tls"
 )
 
 // Flow control mode constants compatible with XTLS conventions.
@@ -216,24 +214,17 @@ func (c *Conn) VerifyHostname(host string) error {
 	return c.Conn.VerifyHostname(host)
 }
 
-// ExportKeyingMaterial delegates to nXTLS if supported.
-// If not implemented, returns an error.
+// ExportKeyingMaterial delegates to nXTLS.ConnectionState if supported.
 func (c *Conn) ExportKeyingMaterial(label string, context []byte, length int) ([]byte, error) {
-	if c.Conn == nil {
-		return nil, errors.New("xtls: connection is nil")
-	}
-	// Try if nXTLS.Conn has ExportKeyingMaterial method.
+	state := c.Conn.ConnectionState()
+	// Check for method existence, otherwise return error.
 	type ekmIface interface {
 		ExportKeyingMaterial(string, []byte, int) ([]byte, error)
 	}
-	if ekmConn, ok := interface{}(c.Conn).(ekmIface); ok {
-		return ekmConn.ExportKeyingMaterial(label, context, length)
+	if ekm, ok := interface{}(&state).(ekmIface); ok {
+		return ekm.ExportKeyingMaterial(label, context, length)
 	}
-	// Try using ekm field if available (function pointer)
-	if c.Conn != nil && c.Conn.ekm != nil {
-		return c.Conn.ekm(label, context, length)
-	}
-	return nil, errors.New("xtls: ExportKeyingMaterial not supported")
+	return nil, errors.New("xtls: ExportKeyingMaterial not supported in this build")
 }
 
 // Copy copies between two XTLS conns or any io.Reader/io.Writer, using io.Copy.
