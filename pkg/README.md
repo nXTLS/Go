@@ -20,7 +20,7 @@ It allows you to use nXTLS as a **drop-in replacement** for XTLS in most Go proj
 ### Import
 
 ```go
-import "github.com/nXTLS/Go/pkg/xtls"
+import "github.com/nXTLS/Go/pkg"
 ```
 
 ### Client Example
