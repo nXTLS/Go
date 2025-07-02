@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	nxtls "github.com/nXTLS/Go/tls"
+	nxtls "github.com/nXTLS/Go"
 )
 
 // Flow control mode constants compatible with XTLS conventions.
